@@ -1,178 +1,199 @@
 '''Parallel tempering MCMC using Fisher and differential evolution jumps.'''
 
 
-from jax import jit, vmap
+from jax import jit, vmap, hessian
+from jax.lax import scan, cond, dynamic_index_in_dim, switch
 import jax.numpy as jnp
 import jax.random as jr
-import numpy as np
 
 
-# function to decide jump proposal acceptance / rejection
-def accept_reject(new_state, new_lnpost, accept_prob, prev_state, prev_lnpost, key):
-    accept = jr.uniform(key) < accept_prob
-    final_state = jnp.where(accept, jnp.copy(new_state), jnp.copy(prev_state))
-    final_lnpost = jnp.where(accept, new_lnpost, prev_lnpost)
-    return final_state, final_lnpost, accept
+# parallel tempering chain swap
+class PT_swap:
 
-# vectorized acceptance / rejection
-vectorized_accept_reject = jit(vmap(accept_reject, in_axes=(0, 0, 0, 0, 0, 0)))
+    def __init__(self, num_chains, temperature_ladder, logpdf):
+        self.num_chains = num_chains  # number of chains
+        self.temperature_ladder = temperature_ladder  # temperature ladder
+        self.logpdf = logpdf  # probability density to sample
+        self.vectorized_logpdf = jit(vmap(self.logpdf, in_axes=(0, 0)))
+        self.chain_ndxs = jnp.arange(self.num_chains)
 
-
-# Parallel tempering swap
-def PT_swap(num_chains,
-            chain_ndx,
-            temp_ladder,
-            iteration,
-            lnpost_func,
-            jump_accept_counts,
-            jump_reject_counts,
-            samples,
-            lnposts,
-            keys):
-
-    # track swaps
-    swap_map = list(np.copy(chain_ndx))
-
-    # store current states and likelihood values
-    states = samples[:, iteration]
-    lnlikes = lnposts[:, iteration] * temp_ladder
-
-    # loop through and propose a swap at each chain (starting from hottest chain and going down in T)
-    # and keep track of results in swap_map
-    for j, swap_chain in enumerate(reversed(range(num_chains - 1))):
-        log_acc_ratio = -lnlikes[swap_map[swap_chain]] / temp_ladder[swap_chain]
-        log_acc_ratio += -lnlikes[swap_map[swap_chain + 1]] / temp_ladder[swap_chain + 1]
-        log_acc_ratio += lnlikes[swap_map[swap_chain + 1]] / temp_ladder[swap_chain]
-        log_acc_ratio += lnlikes[swap_map[swap_chain]] / temp_ladder[swap_chain + 1]
-        acc_ratio = np.exp(log_acc_ratio)
-        
-        # accept or reject swap
-        if jr.uniform(keys[j]) <= acc_ratio:  # accept
-            swap_map[swap_chain], swap_map[swap_chain + 1] = swap_map[swap_chain + 1], swap_map[swap_chain]
-            jump_accept_counts[-1, swap_chain] += 1
-        else:  # reject
-            jump_reject_counts[-1, swap_chain] += 1
-
-    # record final states after all swaps
-    final_states = np.array([states[swap_map_ndx] for swap_map_ndx in swap_map])
-    final_lnposts = np.array([lnpost_func(state, temp) for state, temp in zip(final_states, temp_ladder)])
-    samples[chain_ndx, iteration + 1] = final_states
-    lnposts[chain_ndx, iteration + 1] = final_lnposts
-    
-    return
-
-
-
-def PTMCMC(num_samples,
-           num_chains,
-           x0,
-           ln_posterior_func,
-           jump_proposals,
-           PT_swap_weight=20):
-    
-    # temperature ladder with geometric spacing
-    chain_ndxs = np.arange(num_chains)
-    temp_ladder = 1.3 ** chain_ndxs
-
-    # initialize samples and posterior values
-    ndim = x0.shape[0]
-    samples = np.zeros((num_chains, num_samples, ndim))
-    lnposts = np.zeros((num_chains, num_samples))
-
-    # all chains start at x0
-    samples[:, 0] = np.tile(x0, (num_chains, 1))
-    lnposts[:, 0] = np.array([ln_posterior_func(samp, temp)
-                              for samp, temp in zip(samples[:, 0], temp_ladder)])
-    
-    # organize jump proposals
-    num_jump_types = len(jump_proposals)
-    jump_functions = []
-    jump_names = []
-    jump_weights = []
-    for proposal in jump_proposals:
-        jump_function, weight = proposal
-        jump_functions.append(jump_function)
-        jump_names.append(jump_function.__name__)
-        jump_weights.append(weight)
-    # add PT jump proposal
-    num_jump_types += 1
-    jump_names.append('PT_swap')
-    jump_weights.append(PT_swap_weight)
-
-    # make jump choices
-    jump_selections = np.random.choice(num_jump_types, num_samples, p=jump_weights/np.sum(jump_weights))
-
-    # track jump proposal accept and reject counts
-    jump_accept_counts = np.zeros((num_jump_types, num_chains))
-    jump_reject_counts = np.zeros((num_jump_types, num_chains))
-
-    # main MCMC loop
-    for i in range(num_samples - 1):
-
-        # update progress ocassionally
-        if i % (num_samples // 1000) == 0:
-            print(f'{round(i / num_samples * 100, 3)}%', end='\r')
-
-        # index of jump method
-        jump_ndx = jump_selections[i]
-
-        # independent random keys for chain updates
-        keys = jr.split(jr.PRNGKey(i), num_chains)
-
-        if jump_ndx == num_jump_types - 1:  # parallel tempering swap
-            PT_swap(num_chains=num_chains,
-                    chain_ndx=chain_ndxs,
-                    temp_ladder=temp_ladder,
-                    iteration=i,
-                    lnpost_func=ln_posterior_func,
-                    jump_accept_counts=jump_accept_counts,
-                    jump_reject_counts=jump_reject_counts,
-                    samples=samples,
-                    lnposts=lnposts,
-                    keys=keys)
-            
-        else:  # intra-chain updates
-
-            # which jump proposal method
-            vectorized_jump_function = jump_functions[jump_ndx]
-            
-            # propose jumps
-            new_states = vectorized_jump_function(samples[chain_ndxs, i],
-                                                  i,
-                                                  temp_ladder,
-                                                  keys)
-            
-            # evaluate posterior at new points
-            new_states = np.array(new_states)
-            new_lnposts = jnp.array([ln_posterior_func(state, temp) for state, temp in zip(new_states, temp_ladder)])
-
-            # acceptance probabilities
-            accept_probs = jnp.exp(new_lnposts - lnposts[chain_ndxs, i])
-
-            # accept or reject proposal
-            final_states, final_lnposts, accepted = vectorized_accept_reject(new_states,
-                                                                             new_lnposts,
-                                                                             accept_probs,
-                                                                             samples[chain_ndxs, i],
-                                                                             lnposts[chain_ndxs, i],
-                                                                             keys)
-
-            # convert updates to numpy arrays
-            samples[chain_ndxs, i + 1] = jnp.asarray(final_states)
-            lnposts[chain_ndxs, i + 1] = jnp.asarray(final_lnposts)
-
-            # update acceptance / rejection counts
-            jump_accept_counts[jump_ndx, chain_ndxs] += jnp.asarray(accepted, dtype=int)
-            jump_reject_counts[jump_ndx, chain_ndxs] += jnp.asarray(1 - accepted, dtype=int)
+        self.fast_PT_swap = jit(self.PT_swap)
         
 
-    # compute jump acceptance rates
-    jump_reject_counts[-1, -1] += 1  # hottest chain doesn't swap with hotter chain, prevents NaN
-    accept_rates = jump_accept_counts / (jump_accept_counts + jump_reject_counts)
-    print('Jump acceptance rates')
-    for name, rate in zip(jump_names, accept_rates):
-        print(f'{name}: {rate}')
-    
-    return samples, lnposts, temp_ladder
+    def PT_swap(self,
+                current_states,
+                current_logpdfs,
+                jump_accept_counts,
+                jump_reject_counts,
+                keys):
+
+        # scale logpdfs by temperature
+        current_logpdfs *= self.temperature_ladder
+
+        def swap_step(carry, j):
+            swap_map, jump_accept_counts, jump_reject_counts = carry
+            swap_chain = self.num_chains - 2 - j  # reversed index
+            i  = dynamic_index_in_dim(swap_map, swap_chain, axis=0, keepdims=False)
+            i1 = dynamic_index_in_dim(swap_map, swap_chain + 1, axis=0, keepdims=False)
+
+            # Compute log acceptance ratio
+            log_acc_ratio = -current_logpdfs[i] / self.temperature_ladder[swap_chain]
+            log_acc_ratio += -current_logpdfs[i1] / self.temperature_ladder[swap_chain + 1]
+            log_acc_ratio += current_logpdfs[i1] / self.temperature_ladder[swap_chain]
+            log_acc_ratio += current_logpdfs[i] / self.temperature_ladder[swap_chain + 1]
+            acc_ratio = jnp.exp(log_acc_ratio)
+
+            key = keys[j]
+            rand_val = jr.uniform(key)
+
+            def accept_fn():
+                new_swap_map = swap_map.at[swap_chain].set(i1)
+                new_swap_map = new_swap_map.at[swap_chain + 1].set(i)
+                new_accept = jump_accept_counts.at[-1, swap_chain].add(1)
+                return (new_swap_map, new_accept, jump_reject_counts)
+
+            def reject_fn():
+                new_reject = jump_reject_counts.at[-1, swap_chain].add(1)
+                return (swap_map, jump_accept_counts, new_reject)
+
+            return cond(rand_val <= acc_ratio, accept_fn, reject_fn), None
+
+        # Initialize swap_map
+        swap_map = jnp.copy(self.chain_ndxs)
+
+        ((final_swap_map, final_accepts, final_rejects), _) = scan(
+            swap_step,
+            (swap_map, jump_accept_counts, jump_reject_counts),
+            jnp.arange(self.num_chains - 1)
+        )
+
+        # Update states based on final swap map
+        final_states = current_states[final_swap_map]
+        final_logpdfs = self.vectorized_logpdf(final_states, self.temperature_ladder)
+
+        return final_states, final_logpdfs, final_accepts, final_rejects
+
+
+def mcmc_scan_loop(num_samples,
+                   num_chains,
+                   logpdf_func,
+                   x0,
+                   x_mins,
+                   x_maxs,
+                   jump_proposals=[],
+                   Fisher_jump_weight=20,
+                   DE_jump_weight=20,
+                   PT_swap_weight=20,
+                   seed=0):
+
+    # vectorize pdf
+    vectorized_logpdf = jit(vmap(logpdf_func, in_axes=(0, 0)))
+
+    # define temperature ladder
+    chain_ndxs = jnp.arange(num_chains)
+    temperature_ladder = 1.3 ** chain_ndxs
+    sqrt_temperatures = jnp.sqrt(temperature_ladder)[:, None]
+
+    # initialize states and logpdfs
+    init_states = jnp.tile(x0, (num_chains, 1))
+    init_logpdfs = vmap(logpdf_func)(init_states) / temperature_ladder
+
+    # select jump type for every MCMC iteration
+    jump_weights = jnp.array([Fisher_jump_weight, DE_jump_weight, PT_swap_weight])
+    jump_ndxs = jr.choice(jr.key(seed), jump_weights.shape[0], (num_samples,), p=jump_weights/jnp.sum(jump_weights))
+
+    # initialize jump accept / reject counts
+    accept_counts = jnp.zeros((jump_weights.shape[0], num_chains), dtype=jnp.int32)
+    reject_counts = jnp.zeros((jump_weights.shape[0], num_chains), dtype=jnp.int32)
+
+    # jump along eigenvectors of Fisher
+    Fisher = -hessian(logpdf_func)(x0)
+    vals, vecs = jnp.linalg.eigh(Fisher)
+    Fisher_jumps = 1. / jnp.sqrt(vals) * vecs.T
+    def Fisher_jump(key):
+        weight_key, direction_key = jr.split(key, 2)
+        jump = jr.choice(direction_key, Fisher_jumps)
+        jump *= jr.normal(weight_key)
+        return jump
+    vectorized_Fisher_jump = jit(vmap(Fisher_jump, in_axes=(0)))
+    def Fisher_step(states, logpdfs, iteration, accept_counts, reject_counts, keys):
+        # move to new point in parameter space
+        jumps = vectorized_Fisher_jump(keys) * sqrt_temperatures
+        proposed_states = states + jumps
+        # evaluate posterior and acceptance probabilities at new point
+        proposed_logpdfs = vectorized_logpdf(proposed_states, temperature_ladder)
+        acceptance_probs = jnp.exp(proposed_logpdfs - logpdfs)
+        # accept jump
+        accept = jr.uniform(jr.key(iteration), num_chains) < acceptance_probs
+        new_states = jnp.where(accept[:, None], proposed_states, states)
+        new_logpdfs = jnp.where(accept, proposed_logpdfs, logpdfs)
+        # update accept and reject counts
+        new_accept_counts = accept_counts.at[0].add(accept)
+        new_reject_counts = reject_counts.at[0].add(1 - accept)
+        return new_states, new_logpdfs, new_accept_counts, new_reject_counts
+    fast_Fisher_step = jit(Fisher_step)
+
+    # jump with differential evolution
+    len_history = 100
+    DE_weight = 2.38 / jnp.sqrt(2. * x0.shape[0])
+    history = jr.multivariate_normal(jr.key(seed + 1), x0, jnp.linalg.inv(Fisher), (len_history,))
+    def DE_jump(key):
+        draw_key1, draw_key2, weight_key, epsilon_key = jr.split(key, 4)
+        jump = jr.choice(draw_key1, history) - jr.choice(draw_key2, history)
+        jump *= jr.normal(weight_key) * DE_weight
+        jump += jr.normal(epsilon_key) * 1.e-4
+        return jump
+    vectorized_DE_jump = jit(vmap(DE_jump, in_axes=(0)))
+    def DE_step(states, logpdfs, iteration, accept_counts, reject_counts, keys):
+        # move to new point in parameter space
+        jumps = vectorized_DE_jump(keys)
+        proposed_states = states + jumps
+        # evaluate posterior and acceptance probabilities at new point
+        proposed_logpdfs = vectorized_logpdf(proposed_states, temperature_ladder)
+        acceptance_probs = jnp.exp(proposed_logpdfs - logpdfs)
+        # accept jump
+        accept = jr.uniform(jr.key(iteration), num_chains) < acceptance_probs
+        new_states = jnp.where(accept[:, None], proposed_states, states)
+        new_logpdfs = jnp.where(accept, proposed_logpdfs, logpdfs)
+        # update accept and reject counts
+        new_accept_counts = accept_counts.at[0].add(accept)
+        new_reject_counts = reject_counts.at[0].add(1 - accept)
+        return new_states, new_logpdfs, new_accept_counts, new_reject_counts
+    fast_DE_step = jit(DE_step)
+
+    # parallel tempering swap
+    PT_object = PT_swap(num_chains, temperature_ladder, logpdf_func)
+
+    # one iteration of MCMC
+    def mcmc_step(carry, inp):
+        states, logpdfs, accept_counts, reject_counts = carry
+        iteration, jump_ndx, key = inp
+        keys = jr.split(key, num_chains)
+
+        def Fisher_iteration():
+            return fast_Fisher_step(states, logpdfs, iteration, accept_counts, reject_counts, keys)
+
+        def DE_iteration():
+            return fast_DE_step(states, logpdfs, iteration, accept_counts, reject_counts, keys)
+
+        def PT_iteration():
+            return PT_object.fast_PT_swap(states, logpdfs, accept_counts, reject_counts, keys)
+
+        def do_jump():
+            return switch(jump_ndx, [Fisher_iteration, DE_iteration, PT_iteration])
+
+        new_states, new_logpdfs, new_accepts, new_rejects = do_jump()
+
+        return (new_states, new_logpdfs, new_accepts, new_rejects), (new_states, new_logpdfs)
+
+
+    init_carry = init_states, init_logpdfs, accept_counts, reject_counts
+    scan_inputs = (jnp.arange(1, num_samples + 1), jump_ndxs, jr.split(jr.key(seed + 2), num_samples))
+    (final_states, final_logpdfs, final_accepts, final_rejects), (states, logpdfs) = scan(mcmc_step,
+                                                                     init_carry,
+                                                                     scan_inputs)
+
+    return states, logpdfs, temperature_ladder
+
 
 
