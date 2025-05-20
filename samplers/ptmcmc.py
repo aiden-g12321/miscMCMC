@@ -156,8 +156,8 @@ def mcmc_scan_loop(num_samples,
         new_states = jnp.where(accept[:, None], proposed_states, states)
         new_logpdfs = jnp.where(accept, proposed_logpdfs, logpdfs)
         # update accept and reject counts
-        new_accept_counts = accept_counts.at[0].add(accept)
-        new_reject_counts = reject_counts.at[0].add(1 - accept)
+        new_accept_counts = accept_counts.at[1].add(accept)
+        new_reject_counts = reject_counts.at[1].add(1 - accept)
         return new_states, new_logpdfs, new_accept_counts, new_reject_counts
     fast_DE_step = jit(DE_step)
 
@@ -192,8 +192,12 @@ def mcmc_scan_loop(num_samples,
     (final_states, final_logpdfs, final_accepts, final_rejects), (states, logpdfs) = scan(mcmc_step,
                                                                      init_carry,
                                                                      scan_inputs)
+    # calculate proposal acceptance rates
+    jump_names = ['Fisher', 'DE', 'PT swap']
+    acceptance_rates = {name: acc for name, acc in 
+                        zip(jump_names, final_accepts / (final_accepts + final_rejects))}
 
-    return states, logpdfs, temperature_ladder
+    return states, logpdfs, temperature_ladder, acceptance_rates
 
 
 
