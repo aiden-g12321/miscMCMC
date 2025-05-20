@@ -80,6 +80,8 @@ def ptmcmc_sampler(num_samples,
                    num_chains,
                    logpdf_func,
                    x0,
+                   x_mins,
+                   x_maxs,
                    Fisher_jump_weight=20,
                    DE_jump_weight=20,
                    PT_swap_weight=20,
@@ -122,7 +124,7 @@ def ptmcmc_sampler(num_samples,
     vectorized_pick_Fisher_jump = jit(vmap(pick_Fisher_jump, in_axes=(None, 0)))
     def Fisher_step(states, logpdfs, iteration,
                     accept_counts, reject_counts, keys, Fisher_jumps,
-                    history, Fisher_update_rate=0.1):
+                    history, Fisher_update_rate=0.001):
         # decide whether or not to update Fisher
         update_Fisher = jr.uniform(jr.key(iteration + 2)) < Fisher_update_rate
         def update_Fisher_case():
@@ -149,15 +151,16 @@ def ptmcmc_sampler(num_samples,
     # jump with differential evolution
     len_history = 100
     DE_weight = 2.38 / jnp.sqrt(2. * x0.shape[0])
-    init_history = jr.multivariate_normal(jr.key(seed + 1), x0,
-                                          jnp.linalg.inv(-hessian(logpdf_func)(x0)),
-                                          (len_history,))
+    # init_history = jr.multivariate_normal(jr.key(seed + 1), x0,
+    #                                       jnp.linalg.inv(-hessian(logpdf_func)(x0)),
+    #                                       (len_history,))
+    init_history = jr.uniform(jr.key(seed + 1), shape=(len_history, x0.shape[0]), minval=x_mins, maxval=x_maxs)
     def DE_jump(key, history):
         draw_key1, draw_key2, weight_key, epsilon_key = jr.split(key, 4)
         jump = jr.choice(draw_key1, history) - jr.choice(draw_key2, history)
         jump *= jr.normal(weight_key) * DE_weight
         jump += jr.normal(epsilon_key) * 1.e-4
-        return jump
+        return jump * 10
     vectorized_DE_jump = jit(vmap(DE_jump, in_axes=(0, None)))
     def DE_step(states, logpdfs, iteration, accept_counts, reject_counts, keys, Fisher_jumps, history):
         # move to new point in parameter space
