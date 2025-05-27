@@ -92,7 +92,7 @@ def ptmcmc_sampler(num_samples,
 
     # define temperature ladder
     chain_ndxs = jnp.arange(num_chains)
-    temperature_ladder = 1.3 ** chain_ndxs
+    temperature_ladder = 1.5 ** chain_ndxs
     sqrt_temperatures = jnp.sqrt(temperature_ladder)[:, None]
 
     # initialize states and logpdfs
@@ -112,7 +112,7 @@ def ptmcmc_sampler(num_samples,
     def get_Fisher_jumps(x):
         Fisher = -hessian(logpdf_func)(x)
         vals, vecs = jnp.linalg.eigh(Fisher)
-        Fisher_jumps = 1. / jnp.sqrt(vals) * vecs.T
+        Fisher_jumps = 1. / jnp.sqrt(jnp.abs(vals)) * vecs.T
         return Fisher_jumps
     fast_get_Fisher_jumps = jit(get_Fisher_jumps)
     init_Fisher_jumps = fast_get_Fisher_jumps(x0)
@@ -133,7 +133,8 @@ def ptmcmc_sampler(num_samples,
             return Fisher_jumps
         # move to new point in parameter space
         Fisher_jumps = cond(update_Fisher, update_Fisher_case, no_update_Fisher_case)
-        jumps = vectorized_pick_Fisher_jump(Fisher_jumps, keys) * sqrt_temperatures
+        # jumps = vectorized_pick_Fisher_jump(Fisher_jumps, keys) * sqrt_temperatures
+        jumps = vectorized_pick_Fisher_jump(Fisher_jumps, keys)
         proposed_states = states + jumps
         # evaluate posterior and acceptance probabilities at new point
         proposed_logpdfs = vectorized_logpdf(proposed_states, temperature_ladder)
@@ -151,9 +152,11 @@ def ptmcmc_sampler(num_samples,
     # jump with differential evolution
     len_history = 100
     DE_weight = 2.38 / jnp.sqrt(2. * x0.shape[0])
-    # init_history = jr.multivariate_normal(jr.key(seed + 1), x0,
-    #                                       jnp.linalg.inv(-hessian(logpdf_func)(x0)),
-    #                                       (len_history,))
+    # init_history = jr.multivariate_normal(key=jr.key(seed + 1),
+    #                                       mean=x0,
+    #                                       cov=jnp.linalg.inv(-hessian(logpdf_func)(x0)),
+    #                                       shape=(len_history,),
+    #                                       method='svd')
     init_history = jr.uniform(jr.key(seed + 1), shape=(len_history, x0.shape[0]), minval=x_mins, maxval=x_maxs)
     def DE_jump(key, history):
         draw_key1, draw_key2, weight_key, epsilon_key = jr.split(key, 4)
