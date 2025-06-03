@@ -70,7 +70,8 @@ class PT_swap:
 
         # Update states based on final swap map
         final_states = current_states[final_swap_map]
-        final_logpdfs = self.vectorized_logpdf(final_states, self.temperature_ladder)
+        # final_logpdfs = self.vectorized_logpdf(final_states, self.temperature_ladder)
+        final_logpdfs = current_logpdfs[final_swap_map] / self.temperature_ladder
 
         return final_states, final_logpdfs, final_accepts, final_rejects, Fisher_jumps, history
 
