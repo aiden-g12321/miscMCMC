@@ -1,0 +1,11 @@
+[tool.poetry]
+name = "miscMCMC"
+version = "0.1.0"
+description = "Samplers for MCMC"
+authors = ["Aiden Gundersen"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+numpy = "^1.26.4"
+matplotlib = "^3.8.2"
