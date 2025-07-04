@@ -1,1 +1,1 @@
-from .samplers.jax_ptmcmc import ptmcmc_sampler
+from .samplers import jax_ptmcmc

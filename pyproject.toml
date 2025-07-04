@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "miscMCMC"
-version = "0.1.0"
+version = "0.1.1"
 description = "Samplers for MCMC"
 authors = ["Aiden Gundersen"]
 readme = "README.md"
