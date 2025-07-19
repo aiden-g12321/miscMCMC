@@ -88,6 +88,7 @@ def ptmcmc_sampler(num_samples,
                    DE_jump_weight=20,
                    PT_swap_weight=20,
                    Fisher_update_rate=0.001,
+                   DE_history_with_Fisher=True,
                    seed=0):
 
     # vectorize pdf
@@ -156,12 +157,15 @@ def ptmcmc_sampler(num_samples,
     # jump with differential evolution
     len_history = 100
     DE_weight = 2.38 / jnp.sqrt(2. * x0.shape[0])
-    # init_history = jr.multivariate_normal(key=jr.key(seed + 1),
-    #                                       mean=x0,
-    #                                       cov=jnp.linalg.inv(-hessian(logpdf_func)(x0)),
-    #                                       shape=(len_history,),
-    #                                       method='svd')
-    init_history = jr.uniform(jr.key(seed + 1), shape=(len_history, x0.shape[0]), minval=x_mins, maxval=x_maxs)
+    if DE_history_with_Fisher:
+        init_history = jr.multivariate_normal(key=jr.key(seed + 1),
+                                            mean=x0,
+                                            cov=jnp.linalg.inv(-hessian(logpdf_func)(x0)),
+                                            shape=(len_history,),
+                                            method='svd')
+    else:
+        init_history = jr.uniform(jr.key(seed + 1), shape=(len_history, x0.shape[0]),
+                                  minval=x_mins, maxval=x_maxs)
     def DE_jump(key, history):
         draw_key1, draw_key2, weight_key, epsilon_key = jr.split(key, 4)
         jump = jr.choice(draw_key1, history) - jr.choice(draw_key2, history)
