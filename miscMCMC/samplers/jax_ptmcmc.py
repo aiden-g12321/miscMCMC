@@ -83,6 +83,7 @@ def ptmcmc_sampler(num_samples,
                    x0,
                    x_mins,
                    x_maxs,
+                   temperature_ladder=None,
                    Fisher_jump_weight=20,
                    DE_jump_weight=20,
                    PT_swap_weight=20,
@@ -93,7 +94,8 @@ def ptmcmc_sampler(num_samples,
 
     # define temperature ladder
     chain_ndxs = jnp.arange(num_chains)
-    temperature_ladder = 1.5 ** chain_ndxs
+    if temperature_ladder is None:
+        temperature_ladder = 1.5 ** chain_ndxs
     sqrt_temperatures = jnp.sqrt(temperature_ladder)[:, None]
 
     # initialize states and logpdfs
