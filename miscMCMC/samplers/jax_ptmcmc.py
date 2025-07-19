@@ -87,6 +87,7 @@ def ptmcmc_sampler(num_samples,
                    Fisher_jump_weight=20,
                    DE_jump_weight=20,
                    PT_swap_weight=20,
+                   Fisher_update_rate=0.001,
                    seed=0):
 
     # vectorize pdf
@@ -127,7 +128,7 @@ def ptmcmc_sampler(num_samples,
     vectorized_pick_Fisher_jump = jit(vmap(pick_Fisher_jump, in_axes=(None, 0)))
     def Fisher_step(states, logpdfs, iteration,
                     accept_counts, reject_counts, keys, Fisher_jumps,
-                    history, Fisher_update_rate=0.001):
+                    history):
         # decide whether or not to update Fisher
         update_Fisher = jr.uniform(jr.key(iteration + 2)) < Fisher_update_rate
         def update_Fisher_case():
