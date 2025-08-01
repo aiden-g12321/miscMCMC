@@ -7,6 +7,7 @@ import numpy as np
 def PTMCMC(num_samples,
            num_chains,
            logpdf_func,
+           x0,
            ndim,
            param_mins,
            param_maxs,
@@ -25,6 +26,7 @@ def PTMCMC(num_samples,
     samples = np.zeros((num_chains, num_samples, ndim))
     lnlikes = np.zeros((num_chains, num_samples))
     samples[:, 0] = np.random.uniform(param_mins, param_maxs, (num_chains, ndim))
+    samples[0, 0] = x0
     lnlikes[:, 0] = np.array([logpdf_func(sample, temperature=temperature)
                               for sample, temperature in zip(samples[:, 0], temperature_ladder)])
     
@@ -37,7 +39,7 @@ def PTMCMC(num_samples,
     history = np.random.uniform(param_mins, param_maxs, (len_history, ndim))
     choices1 = np.random.choice(len_history, (num_chains, num_samples))
     choices2 = np.random.choice(len_history, (num_chains, num_samples))
-    DE_weight = 2.38 / np.sqrt(2 * ndim)
+    DE_jump_weight = 2.38 / np.sqrt(2 * ndim)
     weights = np.random.normal(loc=0., scale=1., size=(num_chains, num_samples))
 
     # compute Fisher using finite differencing
@@ -96,7 +98,7 @@ def PTMCMC(num_samples,
         if  jump_ndxs[i] == 1:
             first_draws = np.array([history[ndx] for ndx in choices1[:, i]])
             second_draws = np.array([history[ndx] for ndx in choices2[:, i]])
-            jumps = DE_weight * (first_draws - second_draws)
+            jumps = DE_jump_weight * (first_draws - second_draws)
             jumps = jumps * weights[:, i, None]
             proposals = jumps + samples[:, i]
             lnlike_proposals = np.array([logpdf_func(proposal, temperature=temperature)
